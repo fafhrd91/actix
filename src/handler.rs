@@ -3,13 +3,95 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::channel::oneshot::Sender as SyncSender;
+use futures::channel::oneshot::{self, Receiver as SyncReceiver, Sender as SyncSender};
+use futures::{future::join3, FutureExt};
 
 use crate::actor::{Actor, AsyncContext};
 use crate::address::Addr;
 use crate::context::Context;
-use crate::fut::ActorFuture;
+use crate::fut::{wrap_future, ActorFuture};
 use crate::WrapFuture;
+
+pub struct TempRef<T> {
+    inner: *mut T,
+    drop_sender: Option<SyncSender<()>>,
+}
+
+unsafe impl<T: Send> Send for TempRef<T> {}
+
+impl<T> TempRef<T> {
+    fn new(inner: *mut T) -> (Self, SyncReceiver<()>) {
+        let (s, r) = oneshot::channel::<()>();
+        (
+            TempRef {
+                inner,
+                drop_sender: Some(s),
+            },
+            r,
+        )
+    }
+
+    pub fn as_ref(&self) -> &T {
+        unsafe {
+            let x = self.inner;
+            &*x
+        }
+    }
+    pub fn as_mut(&mut self) -> &mut T {
+        unsafe {
+            let x = self.inner;
+            &mut *x
+        }
+    }
+}
+
+impl<T> Drop for TempRef<T> {
+    fn drop(&mut self) {
+        let sender = self.drop_sender.take().unwrap();
+        sender
+            .send(())
+            .unwrap_or_else(|_| panic!("Failed to notify about dropping TempRef. Bug!"))
+    }
+}
+
+pub trait AsyncHandler<M>
+where
+    Self: Actor,
+    <Self as Actor>::Context: AsyncContext<Self>,
+    M: AsyncMessage,
+{
+    type Result: Future<Output = M::Result> + Sized + 'static;
+
+    fn handle(actor: TempRef<Self>, msg: M, ctx: TempRef<Self::Context>)
+        -> Self::Result;
+}
+
+impl<M, I: Send + 'static, AH> Handler<M> for AH
+where
+    AH: AsyncHandler<M> + 'static,
+    <AH as Actor>::Context: AsyncContext<AH>,
+    M: AsyncMessage<Result = I> + 'static,
+{
+    type Result = ResponseFuture<AsyncResponse<M>>;
+
+    fn handle(&mut self, msg: M, ctx: &mut Self::Context) -> Self::Result {
+        let (actor, actor_dropped) = TempRef::new(self);
+
+        let (tmp_ctx, ctx_dropped) = TempRef::new(ctx);
+
+        let fut_res = async move { Self::handle(actor, msg, tmp_ctx).await };
+
+        let (s, r) = oneshot::channel::<M::Result>();
+
+        ctx.wait(wrap_future(async move {
+            let (res, _, _) = join3(fut_res, actor_dropped, ctx_dropped).await;
+            s.send(res)
+                .unwrap_or_else(|_| panic!("Failed to send future result. Bug!"));
+        }));
+
+        Box::pin(r.map(|r| AsyncResponse(r.unwrap())))
+    }
+}
 
 /// Describes how to handle messages of a specific type.
 ///
@@ -38,6 +120,12 @@ pub trait Message {
     /// The type of value that this message will resolved with if it is
     /// successful.
     type Result: 'static;
+}
+
+pub trait AsyncMessage
+where
+    Self: Message,
+{
 }
 
 /// Allow users to use `Arc<M>` as a message without having to re-impl `Message`
@@ -358,6 +446,24 @@ where
             let res = self.await;
             if let Some(tx) = tx {
                 tx.send(res)
+            }
+        });
+    }
+}
+
+pub struct AsyncResponse<M: AsyncMessage>(M::Result);
+
+impl<A, M> MessageResponse<A, M> for ResponseFuture<AsyncResponse<M>>
+where
+    A: Actor,
+    M: AsyncMessage + 'static,
+    M::Result: Send,
+    A::Context: AsyncContext<A>,
+{
+    fn handle<R: ResponseChannel<M>>(self, _: &mut A::Context, tx: Option<R>) {
+        actix_rt::spawn(async move {
+            if let Some(tx) = tx {
+                tx.send(self.await.0)
             }
         });
     }
