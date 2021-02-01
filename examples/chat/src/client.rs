@@ -5,7 +5,7 @@ use std::{io, net, thread};
 use actix::prelude::*;
 use tokio::io::WriteHalf;
 use tokio::net::TcpStream;
-use tokio_util::codec::FramedRead;
+use tokio_util::codec::{Encoder, FramedRead};
 
 mod codec;
 
@@ -45,9 +45,9 @@ async fn main() {
 
 struct ChatClient {
     framed: actix::io::FramedWrite<
-        codec::ChatRequest,
         WriteHalf<TcpStream>,
         codec::ClientChatCodec,
+        <codec::ClientChatCodec as Encoder<codec::ChatRequest>>::Error,
     >,
 }
 

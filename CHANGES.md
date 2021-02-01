@@ -1,7 +1,8 @@
 # CHANGES
 
 ## Unreleased - 2021-xx-xx
-
+* Changed the signature of `actix::io::FramedWrite` to allow `FramedWrite::write()`'s `item`
+  lifetime to be the lifetime of the function rather than the struct. [#462]
 
 ## 0.11.0-beta.1 - 2021-01-01
 ### Added

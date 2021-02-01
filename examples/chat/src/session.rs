@@ -8,6 +8,7 @@ use actix::prelude::*;
 
 use tokio::io::WriteHalf;
 use tokio::net::TcpStream;
+use tokio_util::codec::Encoder;
 
 use crate::codec::{ChatCodec, ChatRequest, ChatResponse};
 use crate::server::{self, ChatServer};
@@ -29,7 +30,11 @@ pub struct ChatSession {
     /// joined room
     room: String,
     /// Framed wrapper
-    framed: actix::io::FramedWrite<ChatResponse, WriteHalf<TcpStream>, ChatCodec>,
+    framed: actix::io::FramedWrite<
+        WriteHalf<TcpStream>,
+        ChatCodec,
+        <ChatCodec as Encoder<ChatResponse>>::Error,
+    >,
 }
 
 impl Actor for ChatSession {
@@ -125,7 +130,11 @@ impl Handler<Message> for ChatSession {
 impl ChatSession {
     pub fn new(
         addr: Addr<ChatServer>,
-        framed: actix::io::FramedWrite<ChatResponse, WriteHalf<TcpStream>, ChatCodec>,
+        framed: actix::io::FramedWrite<
+            WriteHalf<TcpStream>,
+            ChatCodec,
+            <ChatCodec as Encoder<ChatResponse>>::Error,
+        >,
     ) -> ChatSession {
         ChatSession {
             addr,
